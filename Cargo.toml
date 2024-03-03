@@ -1,0 +1,11 @@
+[package]
+name = "rustic-jsonrpc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rustic-jsonrpc-macro = { path = "rustic-jsonrpc-macro" }
+serde = { version = "1.0.193", features = ["derive"] }
+serde_json = { version = "1.0.108", features = ["raw_value"] }
