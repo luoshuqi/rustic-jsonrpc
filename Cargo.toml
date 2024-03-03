@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "JSON-RPC 2.0 server library written in Rust"
 license = "MIT"
+repository = "https://github.com/luoshuqi/rustic-jsonrpc"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
