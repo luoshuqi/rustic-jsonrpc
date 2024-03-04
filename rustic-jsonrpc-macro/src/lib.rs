@@ -1,15 +1,14 @@
 use proc_macro::TokenStream;
-use std::collections::HashSet;
+use std::mem::take;
 
-use proc_macro2::{Delimiter, Span};
+use proc_macro2::Span;
 use quote::{format_ident, quote, quote_spanned};
-use syn::parse::discouraged::AnyDelimiter;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::visit_mut::{visit_lifetime_mut, visit_type_reference_mut, VisitMut};
 use syn::{
     parse_macro_input, parse_quote, Attribute, Error, FnArg, GenericParam, Ident, ItemFn, Lifetime,
-    LitStr, Pat, ReturnType, Token, Type, TypeReference,
+    LitStr, Meta, Pat, Path, ReturnType, Token, Type, TypeReference,
 };
 
 #[proc_macro]
@@ -31,28 +30,14 @@ pub fn method(attr: TokenStream, input: TokenStream) -> TokenStream {
 
 fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
     check_generic(func)?;
-
     let args = collect_args(func)?;
-    let mut params = Vec::with_capacity(args.len());
-    for arg in &args {
-        if !attr.inject.contains(arg.ident) {
-            params.push(arg);
-        }
-    }
-    for arg in &attr.inject {
-        if args.iter().find(|v| v.ident == arg).is_none() {
-            return Err(Error::new_spanned(arg, "method: unknown argument"));
-        }
-    }
-
-    let output_assert = output_assert(&func);
-    let params_assert = params_assert(&params);
-    let params_struct = params_struct(&params);
+    let params_assert = params_assert(&args);
+    let params_struct = params_struct(&args);
     let mut args_gen = Vec::with_capacity(args.len());
     for arg in args {
         let name = arg.ident;
-        args_gen.push(if attr.inject.contains(name) {
-            match &**arg.ty {
+        args_gen.push(if arg.inject {
+            match &*arg.ty {
                 Type::Reference(TypeReference { elem: ty, .. }) => {
                     let mut ty = ty.clone();
                     RemoveLifetime.visit_type_mut(&mut ty);
@@ -88,6 +73,7 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
         }
     };
 
+    let output_assert = output_assert(&func);
     func.block.stmts.insert(
         0,
         parse_quote! {
@@ -116,7 +102,7 @@ fn check_generic(func: &ItemFn) -> syn::Result<()> {
     let generics = &func.sig.generics;
     for v in &generics.params {
         match v {
-            GenericParam::Lifetime(_) => {}
+            GenericParam::Lifetime(_) => (),
             _ => {
                 return Err(Error::new_spanned(
                     generics,
@@ -162,7 +148,7 @@ impl VisitMut for RemoveLifetime {
     }
 }
 
-fn is_cow(tpe: &Type) -> bool {
+fn borrow(tpe: &Type) -> bool {
     match tpe {
         Type::Path(tpe) => match tpe.path.segments.last() {
             Some(v) => v.ident == "Cow",
@@ -172,19 +158,23 @@ fn is_cow(tpe: &Type) -> bool {
     }
 }
 
-fn params_struct(args: &[&Argument]) -> proc_macro2::TokenStream {
+fn params_struct(args: &[Argument]) -> proc_macro2::TokenStream {
     let mut ident = Vec::with_capacity(args.len());
     let mut ty = Vec::with_capacity(args.len());
     let mut attr: Vec<Option<Attribute>> = Vec::with_capacity(args.len());
     let mut reset_lifetime = ResetLifetime::new();
     for arg in args {
-        ident.push(arg.ident);
+        if arg.inject {
+            continue;
+        }
+
+        ident.push(&arg.ident);
 
         let mut ty_clone = arg.ty.clone();
         reset_lifetime.visit_type_mut(&mut ty_clone);
         ty.push(ty_clone);
 
-        if is_cow(arg.ty) {
+        if borrow(&arg.ty) {
             attr.push(Some(parse_quote!(#[serde(borrow)])));
         } else {
             attr.push(None)
@@ -221,42 +211,46 @@ fn output_assert(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     }
 }
 
-fn params_assert(args: &[&Argument]) -> Vec<proc_macro2::TokenStream> {
+fn params_assert(args: &[Argument]) -> Vec<proc_macro2::TokenStream> {
     let mut assert = Vec::with_capacity(args.len());
     assert.push(quote! {
         const fn assert<'de, T: rustic_jsonrpc::serde::Deserialize<'de>>() { }
     });
+    let mut empty = true;
     for v in args {
-        let ty = v.ty;
+        if v.inject {
+            continue;
+        }
+        empty = false;
+        let ty = &v.ty;
         assert.push(quote_spanned! {ty.span()=>
             assert::<#ty>();
         })
     }
-    assert
+
+    if empty {
+        Vec::new()
+    } else {
+        assert
+    }
 }
 
-struct Argument<'a> {
-    ident: &'a Ident,
-    ty: &'a Box<Type>,
+struct Argument {
+    ident: Ident,
+    ty: Box<Type>,
+    inject: bool,
 }
 
-fn collect_args(func: &ItemFn) -> syn::Result<Vec<Argument>> {
+fn collect_args(func: &mut ItemFn) -> syn::Result<Vec<Argument>> {
     let mut args = Vec::with_capacity(func.sig.inputs.len());
-    for arg in &func.sig.inputs {
+    for arg in &mut func.sig.inputs {
         match arg {
-            FnArg::Receiver(_) => {
-                return Err(Error::new_spanned(
-                    arg,
-                    "method: self parameter is not allowed",
-                ));
-            }
             FnArg::Typed(arg) => match *arg.pat {
-                Pat::Ident(ref pat) => {
-                    args.push(Argument {
-                        ident: &pat.ident,
-                        ty: &arg.ty,
-                    });
-                }
+                Pat::Ident(ref pat) => args.push(Argument {
+                    ident: pat.ident.clone(),
+                    ty: arg.ty.clone(),
+                    inject: remove_inejct_attr(&mut arg.attrs),
+                }),
                 _ => {
                     return Err(Error::new_spanned(
                         arg,
@@ -264,15 +258,54 @@ fn collect_args(func: &ItemFn) -> syn::Result<Vec<Argument>> {
                     ));
                 }
             },
+            FnArg::Receiver(_) => {
+                return Err(Error::new_spanned(
+                    arg,
+                    "method: self parameter is not allowed",
+                ));
+            }
         }
     }
     Ok(args)
 }
 
+fn remove_inejct_attr(attrs: &mut Vec<Attribute>) -> bool {
+    if attrs.is_empty() {
+        return false;
+    }
+
+    fn meta_path(meta: &Meta) -> &Path {
+        match meta {
+            Meta::Path(v) => v,
+            Meta::List(v) => &v.path,
+            Meta::NameValue(v) => &v.path,
+        }
+    }
+
+    let mut present = false;
+    for v in &*attrs {
+        if meta_path(&v.meta).is_ident("inject") {
+            present = true;
+            break;
+        }
+    }
+    if !present {
+        return false;
+    }
+
+    let mut filterd = Vec::new();
+    for v in take(attrs) {
+        if !meta_path(&v.meta).is_ident("inject") {
+            filterd.push(v);
+        }
+    }
+    *attrs = filterd;
+    true
+}
+
 #[derive(Default)]
 struct Attr {
     method_name: Option<String>,
-    inject: HashSet<Ident>,
 }
 
 impl Parse for Attr {
@@ -289,23 +322,6 @@ impl Parse for Attr {
                         input.parse::<Token![,]>()?;
                     }
                 }
-                "inject" if input.is_empty() => {
-                    return Err(Error::new_spanned(ident, "method: expected `inject(...)`"));
-                }
-                "inject" => match input.parse_any_delimiter()? {
-                    (Delimiter::Parenthesis, _, input) => {
-                        while !input.is_empty() {
-                            let ident: Ident = input.parse()?;
-                            attr.inject.insert(ident);
-                            if !input.is_empty() {
-                                input.parse::<Token![,]>()?;
-                            }
-                        }
-                    }
-                    (_, span, _) => {
-                        return Err(Error::new(span.span(), "method: expected `(...)`"));
-                    }
-                },
                 _ => {
                     return Err(Error::new_spanned(
                         &ident,

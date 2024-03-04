@@ -21,13 +21,13 @@ struct Storage {
     data: RwLock<HashMap<String, String>>,
 }
 
-#[method(name = "get", inject(storage))]
-async fn get(storage: &Storage, key: &str) -> Result<Option<String>, Infallible> {
+#[method(name = "get")]
+async fn get(#[inject] storage: &Storage, key: &str) -> Result<Option<String>, Infallible> {
     Ok(storage.data.read().unwrap().get(key).map(|v| v.to_string()))
 }
 
-#[method(inject(storage))]
-async fn set(storage: &Storage, key: String, value: String) -> Result<(), Infallible> {
+#[method]
+async fn set(#[inject] storage: &Storage, key: String, value: String) -> Result<(), Infallible> {
     storage.data.write().unwrap().insert(key, value);
     Ok(())
 }
@@ -35,7 +35,7 @@ async fn set(storage: &Storage, key: String, value: String) -> Result<(), Infall
 fn log_call<'a>(
     req: &'a Request<'a>,
     resp: &'a Result<Value, BoxError>,
-) -> Pin<Box<dyn Future<Output=()> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
         match resp {
             Ok(_) => println!("call method `{}` ok", req.method),
