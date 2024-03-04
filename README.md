@@ -77,3 +77,5 @@ call method `set` ok
 call method `get` ok
 {"jsonrpc":"2.0","result":"bar","id":2}
 ```
+
+[Real world example](https://github.com/luoshuqi/passman)
