@@ -14,7 +14,21 @@ use std::pin::Pin;
 use std::sync::RwLock;
 
 use rustic_jsonrpc::serde_json::{to_string, Value};
-use rustic_jsonrpc::{method, methods, BoxError, Registry, Request};
+use rustic_jsonrpc::{method, methods, BoxError, Container, Error, FromArg, Registry, Request};
+
+struct Auth {}
+
+impl<'a> FromArg<&'a str> for Auth {
+    type Error = Error;
+
+    async fn from_arg(_container: &Container, password: &'a str) -> Result<Self, Self::Error> {
+        if password == "123456" {
+            Ok(Auth {})
+        } else {
+            Err(Error::new(-1, "invalid auth", None))
+        }
+    }
+}
 
 #[derive(Default)]
 struct Storage {
@@ -27,7 +41,12 @@ async fn get(#[inject] storage: &Storage, key: &str) -> Result<Option<String>, I
 }
 
 #[method]
-async fn set(#[inject] storage: &Storage, key: String, value: String) -> Result<(), Infallible> {
+async fn set(
+    #[inject] storage: &Storage,
+    #[from(password: &str)] _auth: Auth,
+    key: String,
+    value: String,
+) -> Result<(), Infallible> {
     storage.data.write().unwrap().insert(key, value);
     Ok(())
 }
@@ -54,7 +73,7 @@ async fn main() {
     // set foo bar
     let response = registry
         .handle(
-            br#"{"jsonrpc":"2.0","method":"set","params":{"key": "foo", "value": "bar"}, "id":1}"#,
+            br#"{"jsonrpc":"2.0","method":"set","params":{"password": "123456","key": "foo", "value": "bar"}, "id":1}"#,
         )
         .await
         .unwrap();

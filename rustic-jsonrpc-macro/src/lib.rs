@@ -1,5 +1,4 @@
 use proc_macro::TokenStream;
-use std::mem::take;
 
 use proc_macro2::Span;
 use quote::{format_ident, quote, quote_spanned};
@@ -8,7 +7,7 @@ use syn::spanned::Spanned;
 use syn::visit_mut::{visit_lifetime_mut, visit_type_reference_mut, VisitMut};
 use syn::{
     parse_macro_input, parse_quote, Attribute, Error, FnArg, GenericParam, Ident, ItemFn, Lifetime,
-    LitStr, Meta, Pat, Path, ReturnType, Token, Type, TypeReference,
+    LitStr, Meta, Pat, ReturnType, Token, Type, TypeReference,
 };
 
 #[proc_macro]
@@ -32,8 +31,9 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
     let mut args_gen = Vec::with_capacity(args.len());
     for arg in args {
         let name = arg.ident;
-        args_gen.push(if arg.inject {
-            match &*arg.ty {
+        args_gen.push(match arg.kind {
+            Kind::Param => quote!(params.#name),
+            Kind::Inject  => match &*arg.ty {
                 Type::Reference(TypeReference { elem: ty, .. }) => {
                     let mut ty = ty.clone();
                     RemoveLifetime.visit_type_mut(&mut ty);
@@ -43,9 +43,13 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
                 }
                 _ => return Err(Error::new_spanned(arg.ty, "method: expected reference")),
             }
-        } else {
-            quote!(params.#name)
-        })
+            Kind::From((ref ident, param_ty)) => {
+                let ty = &arg.ty;
+                quote_spanned! {ty.span()=>
+                    <#ty as rustic_jsonrpc::FromArg::<#param_ty>>::from_arg(container, params.#ident).await?
+                }
+            }
+        });
     }
 
     let ident = &func.sig.ident;
@@ -152,13 +156,14 @@ fn params_struct(args: &[Argument]) -> proc_macro2::TokenStream {
     let mut attr: Vec<Option<Attribute>> = Vec::with_capacity(args.len());
     let mut reset_lifetime = ResetLifetime::new();
     for arg in args {
-        if arg.inject {
-            continue;
-        }
+        let (arg_ident, arg_ty) = match arg.kind {
+            Kind::Param => (&arg.ident, &arg.ty),
+            Kind::Inject => continue,
+            Kind::From((ref arg_ident, ref arg_ty)) => (arg_ident, arg_ty),
+        };
 
-        ident.push(&arg.ident);
-
-        let mut ty_clone = arg.ty.clone();
+        ident.push(arg_ident);
+        let mut ty_clone = arg_ty.clone();
         reset_lifetime.visit_type_mut(&mut ty_clone);
         ty.push(ty_clone);
 
@@ -199,11 +204,16 @@ fn output_assert(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     }
 }
 
+enum Kind {
+    Param,
+    Inject,
+    From((Ident, Box<Type>)),
+}
 
 struct Argument {
     ident: Ident,
     ty: Box<Type>,
-    inject: bool,
+    kind: Kind,
 }
 
 fn collect_args(func: &mut ItemFn) -> syn::Result<Vec<Argument>> {
@@ -214,12 +224,12 @@ fn collect_args(func: &mut ItemFn) -> syn::Result<Vec<Argument>> {
                 Pat::Ident(ref pat) => args.push(Argument {
                     ident: pat.ident.clone(),
                     ty: arg.ty.clone(),
-                    inject: remove_inejct_attr(&mut arg.attrs),
+                    kind: remove_arg_attr(&mut arg.attrs)?,
                 }),
                 _ => {
                     return Err(Error::new_spanned(
                         arg,
-                        "method: non identifier pattern is not allwoed",
+                        "method: non identifier pattern is not allowed",
                     ));
                 }
             },
@@ -234,38 +244,51 @@ fn collect_args(func: &mut ItemFn) -> syn::Result<Vec<Argument>> {
     Ok(args)
 }
 
-fn remove_inejct_attr(attrs: &mut Vec<Attribute>) -> bool {
+fn remove_arg_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Kind> {
+    let mut kind = Kind::Param;
     if attrs.is_empty() {
-        return false;
+        return Ok(kind);
     }
 
-    fn meta_path(meta: &Meta) -> &Path {
-        match meta {
-            Meta::Path(v) => v,
-            Meta::List(v) => &v.path,
-            Meta::NameValue(v) => &v.path,
+    let mut delete = vec![];
+    for i in 0..attrs.len() {
+        match attrs[i].meta {
+            Meta::Path(ref path) if path.is_ident("inject") => match kind {
+                Kind::Param => {
+                    kind = Kind::Inject;
+                    delete.push(i);
+                }
+                _ => return Err(Error::new_spanned(path, "method: unexpected attribute")),
+            },
+            Meta::List(ref list) if list.path.is_ident("from") => {
+                let from = list.parse_args::<From>()?;
+                match kind {
+                    Kind::Param => {
+                        kind = Kind::From(from.0);
+                        delete.push(i);
+                    }
+                    _ => return Err(Error::new_spanned(list, "method: unexpected attribute")),
+                };
+            }
+            _ => (),
         }
     }
 
-    let mut present = false;
-    for v in &*attrs {
-        if meta_path(&v.meta).is_ident("inject") {
-            present = true;
-            break;
-        }
+    for i in delete.into_iter().rev() {
+        attrs.remove(i);
     }
-    if !present {
-        return false;
-    }
+    Ok(kind)
+}
 
-    let mut filterd = Vec::new();
-    for v in take(attrs) {
-        if !meta_path(&v.meta).is_ident("inject") {
-            filterd.push(v);
-        }
+struct From((Ident, Box<Type>));
+
+impl Parse for From {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let ident = input.parse::<Ident>()?;
+        input.parse::<Token![:]>()?;
+        let ty = input.parse::<Box<Type>>()?;
+        Ok(Self((ident, ty)))
     }
-    *attrs = filterd;
-    true
 }
 
 #[derive(Default)]

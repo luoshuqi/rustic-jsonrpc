@@ -213,3 +213,10 @@ where
     E: Into<BoxError>,
 {
 }
+
+#[allow(async_fn_in_trait)]
+pub trait FromArg<T>: Sized {
+    type Error: StdError;
+
+    async fn from_arg(container: &Container, arg: T) -> Result<Self, Self::Error>;
+}
