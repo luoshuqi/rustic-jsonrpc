@@ -22,16 +22,12 @@ pub fn method_ident(input: TokenStream) -> TokenStream {
 pub fn method(attr: TokenStream, input: TokenStream) -> TokenStream {
     let attr = parse_macro_input!(attr as Attr);
     let mut func = parse_macro_input!(input as ItemFn);
-    match expand_method(&attr, &mut func) {
-        Ok(v) => v,
-        Err(e) => e.to_compile_error().into(),
-    }
+    expand_method(&attr, &mut func).unwrap_or_else(|e| e.to_compile_error().into())
 }
 
 fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
     check_generic(func)?;
     let args = collect_args(func)?;
-    let params_assert = params_assert(&args);
     let params_struct = params_struct(&args);
     let mut args_gen = Vec::with_capacity(args.len());
     for arg in args {
@@ -74,15 +70,7 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
     };
 
     let output_assert = output_assert(&func);
-    func.block.stmts.insert(
-        0,
-        parse_quote! {
-            {
-                #(#params_assert)*
-                #output_assert
-            }
-        },
-    );
+    func.block.stmts.insert(0, parse_quote!(#output_assert));
     let vis = &func.vis;
     let gen = quote! {
         #func
@@ -203,7 +191,7 @@ fn params_struct(args: &[Argument]) -> proc_macro2::TokenStream {
 fn output_assert(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     match item_fn.sig.output {
         ReturnType::Default => {
-            syn::Error::new_spanned(&item_fn.sig, "method: expected return type").to_compile_error()
+            Error::new_spanned(&item_fn.sig, "method: expected return type").to_compile_error()
         }
         ReturnType::Type(_, ref ty) => quote_spanned! {ty.span()=>
             { let _ = <#ty as rustic_jsonrpc::MethodResult>::ASSERT; }
@@ -211,29 +199,6 @@ fn output_assert(item_fn: &ItemFn) -> proc_macro2::TokenStream {
     }
 }
 
-fn params_assert(args: &[Argument]) -> Vec<proc_macro2::TokenStream> {
-    let mut assert = Vec::with_capacity(args.len());
-    assert.push(quote! {
-        const fn assert<'de, T: rustic_jsonrpc::serde::Deserialize<'de>>() { }
-    });
-    let mut empty = true;
-    for v in args {
-        if v.inject {
-            continue;
-        }
-        empty = false;
-        let ty = &v.ty;
-        assert.push(quote_spanned! {ty.span()=>
-            assert::<#ty>();
-        })
-    }
-
-    if empty {
-        Vec::new()
-    } else {
-        assert
-    }
-}
 
 struct Argument {
     ident: Ident,
