@@ -17,7 +17,7 @@ pub use rustic_jsonrpc_macro::method_ident;
 
 #[macro_export]
 macro_rules! methods {
-    ($($name:ident),+) => {
+    ($($name:ident),+ $(,)?) => {
         &[$(rustic_jsonrpc::method_ident!($name)),*]
     };
 }
