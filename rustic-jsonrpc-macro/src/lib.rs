@@ -85,7 +85,7 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
 
 fn format_method_ident(i: &Ident) -> Ident {
     format_ident!(
-        "RUSTIC_JSONRRPC_METHOD_{}",
+        "RUSTIC_JSONRPC_METHOD_{}",
         i.to_string().to_ascii_uppercase()
     )
 }
