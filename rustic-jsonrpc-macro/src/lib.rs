@@ -30,7 +30,7 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
     let params_struct = params_struct(&args);
     let mut args_gen = Vec::with_capacity(args.len());
     for arg in args {
-        let name = arg.ident;
+        let name = arg.ident.unwrap();
         args_gen.push(match arg.kind {
             Kind::Param => quote!(params.#name),
             Kind::Inject  => match &*arg.ty {
@@ -157,7 +157,7 @@ fn params_struct(args: &[Argument]) -> proc_macro2::TokenStream {
     let mut reset_lifetime = ResetLifetime::new();
     for arg in args {
         let (arg_ident, arg_ty) = match arg.kind {
-            Kind::Param => (&arg.ident, &arg.ty),
+            Kind::Param => (arg.ident.as_ref().unwrap(), &arg.ty),
             Kind::Inject => continue,
             Kind::From((ref arg_ident, ref arg_ty)) => (arg_ident, arg_ty),
         };
@@ -211,7 +211,7 @@ enum Kind {
 }
 
 struct Argument {
-    ident: Ident,
+    ident: Option<Ident>,
     ty: Box<Type>,
     kind: Kind,
 }
@@ -220,19 +220,27 @@ fn collect_args(func: &mut ItemFn) -> syn::Result<Vec<Argument>> {
     let mut args = Vec::with_capacity(func.sig.inputs.len());
     for arg in &mut func.sig.inputs {
         match arg {
-            FnArg::Typed(arg) => match *arg.pat {
-                Pat::Ident(ref pat) => args.push(Argument {
-                    ident: pat.ident.clone(),
-                    ty: arg.ty.clone(),
-                    kind: remove_arg_attr(&mut arg.attrs)?,
-                }),
-                _ => {
-                    return Err(Error::new_spanned(
-                        arg,
-                        "method: non identifier pattern is not allowed",
-                    ));
-                }
-            },
+            FnArg::Typed(arg) => {
+                let kind = remove_arg_attr(&mut arg.attrs)?;
+                match *arg.pat {
+                    Pat::Ident(ref pat) => args.push(Argument {
+                        ident: Some(pat.ident.clone()),
+                        ty: arg.ty.clone(),
+                        kind,
+                    }),
+                    Pat::Wild(_) if matches!(kind, Kind::From(_)) => args.push(Argument {
+                        ident: None,
+                        ty: arg.ty.clone(),
+                        kind,
+                    }),
+                    _ => {
+                        return Err(Error::new_spanned(
+                            arg,
+                            "method: non identifier pattern is not allowed",
+                        ));
+                    }
+                };
+            }
             FnArg::Receiver(_) => {
                 return Err(Error::new_spanned(
                     arg,
