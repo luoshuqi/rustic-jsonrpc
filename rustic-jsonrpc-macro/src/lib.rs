@@ -30,11 +30,14 @@ fn expand_method(attr: &Attr, func: &mut ItemFn) -> syn::Result<TokenStream> {
     let params_struct = params_struct(&args);
     let mut args_gen = Vec::with_capacity(args.len());
     for arg in args {
-        let name = arg.ident.unwrap();
         args_gen.push(match arg.kind {
-            Kind::Param => quote!(params.#name),
+            Kind::Param => {
+                let name = arg.ident.unwrap();
+                quote!(params.#name)
+            }
             Kind::Inject  => match &*arg.ty {
                 Type::Reference(TypeReference { elem: ty, .. }) => {
+                    let name = arg.ident.unwrap();
                     let mut ty = ty.clone();
                     RemoveLifetime.visit_type_mut(&mut ty);
                     quote_spanned! {arg.ty.span()=>
